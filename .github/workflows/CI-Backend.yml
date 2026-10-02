@@ -1,0 +1,128 @@
+name: Backend CI
+on:
+  pull_request:
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    working-directory: backend
+jobs:
+  gitleaks:
+    name: Gitleaks (secret scan)
+    runs-on: ubicloud-standard-4
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          VERSION=8.28.0
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run gitleaks
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          echo "Scanning range origin/${{ github.base_ref }}..HEAD"
+          gitleaks detect --source . --redact --verbose \
+            --log-opts="origin/${{ github.base_ref }}..HEAD"
+  lockfile:
+    name: Lockfile in sync (uv)
+    runs-on: ubicloud-standard-4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.13"
+          enable-cache: true
+          python-version: "3.12"
+      # Fails if pyproject.toml changed without a matching `uv lock` committed.
+      # --frozen (used by lint/audit) installs from the lock as-is and does NOT
+      # verify it against pyproject; --locked is the actual drift assertion.
+      - name: Verify uv.lock is up to date
+        run: uv lock --locked
+  lint:
+    name: Lint & format (ruff)
+    runs-on: ubicloud-standard-4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.13"
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install ruff (dev tools only)
+        run: uv sync --frozen --only-group dev
+      - name: Ruff lint
+        run: uv run --no-sync ruff check .
+      - name: Ruff format check
+        run: uv run --no-sync ruff format --check .
+  audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubicloud-standard-4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.13"
+          enable-cache: true
+          python-version: "3.12"
+      - name: Export locked dependency set (incl. dev, no hashes)
+        run: uv export --frozen --no-emit-project --no-hashes --format requirements-txt -o /tmp/audit-requirements.txt
+      - name: Audit for known vulnerabilities
+        # Pin pip-audit so CI behavior only changes when we bump this
+        # version intentionally (uvx alone would float to latest).
+        # Temporarily ignore advisories still open after Batches 1–3
+        # (GeoPandas/dotenv/Pillow/pytest). Justified:
+        # - LangChain ecosystem deferred (major 0.2→0.3+/1.x migration)
+        # - Remaining pkgs scheduled (django, pyjwt, cryptography, …)
+        # Remove each flag when that package is upgraded.
+        run: >
+          uvx pip-audit==2.10.1
+          --requirement /tmp/audit-requirements.txt
+          --ignore-vuln CVE-2025-64712
+          --ignore-vuln GHSA-537c-gmf6-5ccf
+          --ignore-vuln GHSA-f4xh-w4cj-qxq8
+          --ignore-vuln PYSEC-2025-183
+          --ignore-vuln PYSEC-2026-120
+          --ignore-vuln PYSEC-2026-1284
+          --ignore-vuln PYSEC-2026-1515
+          --ignore-vuln PYSEC-2026-1518
+          --ignore-vuln PYSEC-2026-1520
+          --ignore-vuln PYSEC-2026-160
+          --ignore-vuln PYSEC-2026-175
+          --ignore-vuln PYSEC-2026-176
+          --ignore-vuln PYSEC-2026-177
+          --ignore-vuln PYSEC-2026-178
+          --ignore-vuln PYSEC-2026-179
+          --ignore-vuln PYSEC-2026-2090
+          --ignore-vuln PYSEC-2026-2091
+          --ignore-vuln PYSEC-2026-2092
+          --ignore-vuln PYSEC-2026-2141
+          --ignore-vuln PYSEC-2026-2192
+          --ignore-vuln PYSEC-2026-2193
+          --ignore-vuln PYSEC-2026-2268
+          --ignore-vuln PYSEC-2026-2269
+          --ignore-vuln PYSEC-2026-2555
+          --ignore-vuln PYSEC-2026-2562
+          --ignore-vuln PYSEC-2026-2563
+          --ignore-vuln PYSEC-2026-2564
+          --ignore-vuln PYSEC-2026-2582
+          --ignore-vuln PYSEC-2026-2583
+          --ignore-vuln PYSEC-2026-3447
+          --ignore-vuln PYSEC-2026-35
+          --ignore-vuln PYSEC-2026-373
+          --ignore-vuln PYSEC-2026-597
+          --ignore-vuln PYSEC-2026-76
+          --ignore-vuln PYSEC-2026-77

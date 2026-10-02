@@ -1,0 +1,117 @@
+version: 2
+updates:
+  # -------------------------------------------------------------------
+  # Backend (Python, uv-managed) — reads pyproject.toml + uv.lock.
+  # Covers our 61 direct deps AND transitives, incl. dev tooling.
+  # NOTE: we target the uv.lock (not requirements.txt) on purpose —
+  # requirements.txt is exported --no-dev, so dev-tool CVEs (e.g. pytest)
+  # would otherwise never surface.
+  # -------------------------------------------------------------------
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      # One grouped PR for all security fixes → easier batched review.
+      python-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      # One grouped PR for routine minor/patch version bumps.
+      python-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    # Major version updates are intentionally left ungrouped so each
+    # gets its own PR for careful, isolated review (e.g. Pillow, LangChain).
+    commit-message:
+      prefix: chore
+      include: scope
+    labels:
+      - "dependencies"
+      - "backend"
+
+  # -------------------------------------------------------------------
+  # GitHub Actions used by our workflows — cheap, and they get alerts too.
+  # -------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # -------------------------------------------------------------------
+  # Keeps @example-org/ui-kit in sync when org-ui publishes to GitHub Packages.
+  # (unchanged — pre-existing entry)
+  # -------------------------------------------------------------------
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      production-dependencies:
+        dependency-type: production
+        update-types: ["minor", "patch"]
+      development-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: /frontend-2
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      production-dependencies:
+        dependency-type: production
+        update-types: ["minor", "patch"]
+        exclude-patterns: ["@example-org/ui-kit"]
+      development-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: /frontend-2
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+      include: scope
+    allow:
+      - dependency-name: "@example-org/ui-kit"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]

@@ -1,0 +1,20 @@
+# Local virtualenv — built fresh inside the image; must not be copied in.
+.venv/
+venv/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# VCS / editor
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Local env (provided at runtime via env_file)
+.env

@@ -1,0 +1,185 @@
+name: New Stage CI/CD
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  actions: read
+  packages: write
+
+jobs:
+  changes:
+    runs-on: ubicloud-standard-4
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend-2/**'
+
+  build-and-push-backend:
+    if: needs.changes.outputs.backend == 'true'
+    needs: changes
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push backend Docker image
+        uses: docker/build-push-action@v3
+        with:
+          file: ./backend/Dockerfile
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository }}-backend-new-stg:${{ github.sha }}
+
+  build-and-push-frontend:
+    if: needs.changes.outputs.frontend == 'true'
+    needs: changes
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push frontend Docker image
+        uses: docker/build-push-action@v3
+        with:
+          file: ./frontend-2/Dockerfile
+          context: ./frontend-2
+          push: true
+          tags: ghcr.io/${{ github.repository }}-frontend-new-stg:${{ github.sha }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL }}
+            NEXT_PUBLIC_VENDOR_API_URL=${{ vars.NEXT_PUBLIC_VENDOR_API_URL }}
+            NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${{ vars.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY }}
+            NEXT_PUBLIC_AUTH0_DOMAIN=${{ vars.NEXT_PUBLIC_AUTH0_DOMAIN }}
+            NEXT_PUBLIC_AUTH0_CLIENT_ID=${{ vars.NEXT_PUBLIC_AUTH0_CLIENT_ID }}
+            NEXT_PUBLIC_AUTH0_SCOPE=${{ vars.NEXT_PUBLIC_AUTH0_SCOPE }}
+            NEXT_PUBLIC_AUTH0_AUDIENCE=${{ vars.NEXT_PUBLIC_AUTH0_AUDIENCE }}
+            NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY }}
+            NEXT_PUBLIC_POSTHOG_KEY=${{ vars.NEXT_PUBLIC_POSTHOG_KEY }}
+            NEXT_PUBLIC_POSTHOG_HOST=${{ vars.NEXT_PUBLIC_POSTHOG_HOST }}
+            CSP_API_DOMAIN=${{ vars.CSP_API_DOMAIN }}
+            CSP_SCRIPT_SOURCES=${{ vars.CSP_SCRIPT_SOURCES }}
+            CSP_CONNECT_SOURCES=${{ vars.CSP_CONNECT_SOURCES }}
+            CSP_FRAME_SOURCES=${{ vars.CSP_FRAME_SOURCES }}
+            CSP_MANIFEST_DOMAIN=${{ vars.CSP_MANIFEST_DOMAIN }}
+            CSP_ENABLED=${{ vars.CSP_ENABLED }}
+            NEXT_PUBLIC_PARTNER_INTEGRATION_ENABLED=${{ vars.NEXT_PUBLIC_PARTNER_INTEGRATION_ENABLED }}
+            SENTRY_AUTH_TOKEN=${{ vars.SENTRY_AUTH_TOKEN }}
+            SENTRY_DSN=${{ vars.SENTRY_DSN }}
+            SENTRY_ENVIRONMENT=${{ vars.SENTRY_ENVIRONMENT }}
+            SENTRY_ORG=${{ vars.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ vars.SENTRY_PROJECT }}
+            SENTRY_TRACES_SAMPLE_RATE=${{ vars.SENTRY_TRACES_SAMPLE_RATE }}
+            NEXT_PUBLIC_SENTRY_DSN=${{ vars.SENTRY_DSN }}
+            NEXT_PUBLIC_SENTRY_ENVIRONMENT=${{ vars.SENTRY_ENVIRONMENT }}
+            CSP_MEDIA_SOURCES=${{ vars.CSP_MEDIA_SOURCES }}
+          secrets: |
+            stripe_secret_key=${{ secrets.STRIPE_SECRET_KEY }}
+            node_auth_token=${{ secrets.NODE_AUTH_TOKEN || vars.NODE_AUTH_TOKEN }}
+
+  backend-ecs-update:
+    if: needs.changes.outputs.backend == 'true'
+    needs: build-and-push-backend
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Backend to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-new-stage-ecs-cluster
+          target: sample-app-be-new-service
+          tag: ${{ github.sha }}
+          rollback: true
+          timeout: 300
+
+  celery-worker-ecs-update:
+    if: needs.changes.outputs.backend == 'true'
+    needs: build-and-push-backend
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Celery Worker to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-new-stage-ecs-cluster
+          target: sample-app-celery-worker-new-service
+          tag: ${{ github.sha }}
+          rollback: true
+          timeout: 300
+
+  celery-beat-ecs-update:
+    if: needs.changes.outputs.backend == 'true'
+    needs: build-and-push-backend
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Celery Beat to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-new-stage-ecs-cluster
+          target: sample-app-celery-beat-new-service
+          tag: ${{ github.sha }}
+          rollback: true
+          timeout: 300
+
+  frontend-ecs-update:
+    if: needs.changes.outputs.frontend == 'true'
+    needs: build-and-push-frontend
+    runs-on: ubicloud-standard-4
+    environment: stg
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Frontend to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-new-stage-ecs-cluster
+          target: sample-app-fe-new-service
+          tag: ${{ github.sha }}
+          rollback: true
+          timeout: 300
+          

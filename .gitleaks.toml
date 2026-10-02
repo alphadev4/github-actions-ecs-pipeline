@@ -1,0 +1,16 @@
+title = "sample-app gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Docs, examples and local-only artifacts"
+paths = [
+  '''(?i).*\.md$''',
+  '''htmlcov/''',
+  '''doxygen/''',
+  '''gitleaks-report\.txt$''',
+  '''\.env$''',
+  '''\.env\..*$''',
+  '''__pycache__/''',
+]

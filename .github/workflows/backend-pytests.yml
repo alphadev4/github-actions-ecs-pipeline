@@ -1,0 +1,71 @@
+name: Backend Tests
+on:
+  pull_request:
+    branches: [dev, staging, main]
+  push:
+    branches: [dev, staging, main]
+  workflow_dispatch:
+concurrency:
+  group: backend-tests-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    working-directory: backend
+jobs:
+  test:
+    name: Tests (pytest, parallel)
+    runs-on: ubicloud-standard-4
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sample_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SECRET_KEY: django-insecure-ci-test-key-not-for-production
+      DB_NAME: sample_db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: localhost
+      DB_PORT: 5432
+      USE_REDIS_CHANNEL_LAYER: "False"
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      AUTH0_CLIENT_SECRET: ci-dummy-auth0-secret
+      STRIPE_SECRET_KEY: sk_test_ci_dummy
+      STRIPE_PUBLISHABLE_KEY: pk_test_ci_dummy
+      STRIPE_WEBHOOK_SECRET: whsec_ci_dummy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgdal-dev gdal-bin libgeos-dev libproj-dev binutils
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Test tooling (pytest, pytest-django, factory-boy, faker, pytest-xdist, ...)
+          # lives in pyproject.toml's [dependency-groups] dev, not requirements.txt.
+          pip install --group dev
+          pip install pytest-xdist
+      - name: Run migrations
+        run: python manage.py migrate --noinput
+      - name: Run pytest
+        run: pytest -n auto

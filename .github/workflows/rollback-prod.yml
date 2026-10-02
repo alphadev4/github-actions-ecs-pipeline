@@ -1,0 +1,154 @@
+name: Rollback Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to roll back TO (e.g. v6.1). Image must already exist in GHCR.'
+        required: true
+      services:
+        description: 'Which services to roll back'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - backend-only
+          - frontend-only
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+concurrency:
+  group: prod-deploy          
+  cancel-in-progress: false   
+
+jobs:
+  verify-images:
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify images exist for ${{ github.event.inputs.version }}
+        run: |
+          set -e
+          V="${{ github.event.inputs.version }}"
+          S="${{ github.event.inputs.services }}"
+
+          check() {
+            echo "Checking $1:$V ..."
+            docker manifest inspect "$1:$V" > /dev/null \
+              && echo "  OK" \
+              || { echo "  MISSING — cannot roll back to $V"; exit 1; }
+          }
+
+          if [ "$S" = "all" ] || [ "$S" = "backend-only" ]; then
+            check "ghcr.io/${{ github.repository }}-backend-prod"
+          fi
+          if [ "$S" = "all" ] || [ "$S" = "frontend-only" ]; then
+            check "ghcr.io/${{ github.repository }}-frontend-prod"
+          fi
+
+  rollback-backend:
+    if: github.event.inputs.services == 'all' || github.event.inputs.services == 'backend-only'
+    needs: verify-images
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Roll back Backend
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-be-service
+          tag: ${{ github.event.inputs.version }}
+          rollback: true
+          timeout: 300
+
+  rollback-celery-worker:
+    if: github.event.inputs.services == 'all' || github.event.inputs.services == 'backend-only'
+    needs: verify-images
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Roll back Celery Worker
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-celery-worker-service
+          tag: ${{ github.event.inputs.version }}
+          rollback: true
+          timeout: 300
+
+  rollback-celery-beat:
+    if: github.event.inputs.services == 'all' || github.event.inputs.services == 'backend-only'
+    needs: verify-images
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Roll back Celery Beat
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-celery-beat-service
+          tag: ${{ github.event.inputs.version }}
+          rollback: true
+          timeout: 300
+
+  rollback-frontend:
+    if: github.event.inputs.services == 'all' || github.event.inputs.services == 'frontend-only'
+    needs: verify-images
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Roll back Frontend
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-fe-service
+          tag: ${{ github.event.inputs.version }}
+          rollback: true
+          timeout: 300
+
+  notify:
+    needs: [rollback-backend, rollback-celery-worker, rollback-celery-beat, rollback-frontend]
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') &&
+      contains(needs.*.result, 'success')
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Notify deploy channel
+        if: ${{ vars.SLACK_DEPLOY_ENABLED == 'true' }}
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_DEPLOY_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\": \":rewind: *ROLLBACK*: prod rolled back to *${{ github.event.inputs.version }}* (${{ github.event.inputs.services }}) by ${{ github.actor }}\"}"

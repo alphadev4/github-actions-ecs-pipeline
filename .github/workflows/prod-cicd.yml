@@ -1,0 +1,336 @@
+name: Prod CI/CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. v7.0 (new = deploy main HEAD & tag it; existing = re-deploy that tag)'
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  actions: read
+  packages: write
+
+concurrency:
+  group: prod-deploy
+  cancel-in-progress: false
+
+jobs:
+  resolve-version:
+    runs-on: ubicloud-standard-4
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      deploy_ref: ${{ steps.v.outputs.deploy_ref }}     
+      tag_exists: ${{ steps.v.outputs.tag_exists }}
+      prev_tag: ${{ steps.v.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+
+          # Enforce the version format — this IS the release discipline
+          if ! echo "$VERSION" | grep -qE '^v[0-9]+\.[0-9]+$'; then
+            echo "::error::Version must look like v7.0 (got: $VERSION)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          if git rev-parse "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION exists — this is a RE-DEPLOY of that tag."
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "deploy_ref=refs/tags/$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Tag $VERSION is new — deploying dispatched commit ${{ github.sha }}; tag will be created on success."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "deploy_ref=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+          # Previous release tag = diff base for path filtering & release notes
+          PREV=$(git tag --list 'v*' --sort=-creatordate \
+                 | grep -v "^${VERSION}$" | head -n 1 || true)
+          echo "prev_tag=$PREV" >> $GITHUB_OUTPUT
+          echo "Previous release tag: ${PREV:-<none>}"
+
+  changes:
+    needs: resolve-version
+    runs-on: ubicloud-standard-4
+    outputs:
+      backend: ${{ steps.filter.outputs.backend || steps.filter-all.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend || steps.filter-all.outputs.frontend }}
+      infrastructure: ${{ steps.filter.outputs.infrastructure || steps.filter-all.outputs.infrastructure }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.deploy_ref }}
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        if: needs.resolve-version.outputs.prev_tag != ''
+        id: filter
+        with:
+          base: ${{ needs.resolve-version.outputs.prev_tag }}
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend-2/**'
+            infrastructure:
+              - 'infrastructure/**'
+
+      - name: Deploy everything (no previous release tag)
+        if: needs.resolve-version.outputs.prev_tag == ''
+        id: filter-all
+        run: |
+          echo "backend=true" >> $GITHUB_OUTPUT
+          echo "frontend=true" >> $GITHUB_OUTPUT
+          echo "infrastructure=true" >> $GITHUB_OUTPUT
+
+  build-and-push-backend:
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.deploy_ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          file: ./backend/Dockerfile
+          context: ./backend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-backend-prod:${{ needs.resolve-version.outputs.version }}
+            ghcr.io/${{ github.repository }}-backend-prod:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-and-push-frontend:
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.deploy_ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend Docker image
+        uses: docker/build-push-action@v6
+        with:
+          file: ./frontend-2/Dockerfile
+          context: ./frontend-2
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-frontend-prod:${{ needs.resolve-version.outputs.version }}
+            ghcr.io/${{ github.repository }}-frontend-prod:${{ github.sha }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.REACT_APP_API_URL }}
+            NEXT_PUBLIC_WS_URL=${{ secrets.REACT_APP_WS_URL }}
+            NEXT_PUBLIC_VENDOR_API_URL=${{ secrets.REACT_APP_VENDOR_API_URL }}
+            NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${{ secrets.REACT_APP_GOOGLE_MAPS_API }}
+            NEXT_PUBLIC_AUTH0_DOMAIN=${{ secrets.REACT_APP_AUTH0_DOMAIN }}
+            NEXT_PUBLIC_AUTH0_CLIENT_ID=${{ secrets.REACT_APP_AUTH0_CLIENTID }}
+            NEXT_PUBLIC_AUTH0_SCOPE=${{ secrets.REACT_APP_AUTH0_SCOPE }}
+            NEXT_PUBLIC_AUTH0_AUDIENCE=${{ secrets.REACT_APP_AUTH0_AUDIENCE }}
+            NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY }}
+            NEXT_PUBLIC_POSTHOG_KEY=${{ secrets.NEXT_PUBLIC_POSTHOG_KEY }}
+            NEXT_PUBLIC_POSTHOG_HOST=${{ secrets.NEXT_PUBLIC_POSTHOG_HOST }}
+            CSP_API_DOMAIN=${{ vars.CSP_API_DOMAIN }}
+            CSP_SCRIPT_SOURCES=${{ vars.CSP_SCRIPT_SOURCES }}
+            CSP_CONNECT_SOURCES=${{ vars.CSP_CONNECT_SOURCES }}
+            CSP_FRAME_SOURCES=${{ vars.CSP_FRAME_SOURCES }}
+            CSP_FONT_SOURCES=${{ vars.CSP_FONT_SOURCES }}
+            CSP_MANIFEST_DOMAIN=${{ vars.CSP_MANIFEST_DOMAIN }}
+            CSP_ENABLED=${{ vars.CSP_ENABLED }}|
+            NEXT_PUBLIC_PARTNER_INTEGRATION_ENABLED=${{ vars.NEXT_PUBLIC_PARTNER_INTEGRATION_ENABLED }}
+            SENTRY_AUTH_TOKEN=${{ vars.SENTRY_AUTH_TOKEN }}
+            SENTRY_DSN=${{ vars.SENTRY_DSN }}
+            SENTRY_ENVIRONMENT=${{ vars.SENTRY_ENVIRONMENT }}
+            SENTRY_ORG=${{ vars.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ vars.SENTRY_PROJECT }}
+            SENTRY_TRACES_SAMPLE_RATE=${{ vars.SENTRY_TRACES_SAMPLE_RATE }}
+            NEXT_PUBLIC_SENTRY_DSN=${{ vars.SENTRY_DSN }}
+            NEXT_PUBLIC_SENTRY_ENVIRONMENT=${{ vars.SENTRY_ENVIRONMENT }}
+          secrets: |
+            stripe_secret_key=${{ secrets.STRIPE_SECRET_KEY }}
+            node_auth_token=${{ secrets.NODE_AUTH_TOKEN || vars.NODE_AUTH_TOKEN }}
+
+
+  backend-ecs-update:
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes, build-and-push-backend]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Backend to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-be-service
+          tag: ${{ needs.resolve-version.outputs.version }}
+          rollback: true
+          timeout: 300
+
+  celery-worker-ecs-update:
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes, build-and-push-backend]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Celery Worker to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-celery-worker-service
+          tag: ${{ needs.resolve-version.outputs.version }}
+          rollback: true
+          timeout: 300
+
+  celery-beat-ecs-update:
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes, build-and-push-backend]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Celery Beat to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-celery-beat-service
+          tag: ${{ needs.resolve-version.outputs.version }}
+          rollback: true
+          timeout: 300
+
+  frontend-ecs-update:
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.infrastructure == 'true'
+    needs: [resolve-version, changes, build-and-push-frontend]
+    runs-on: ubicloud-standard-4
+    environment: prod
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy Frontend to ECS
+        uses: donaldpiret/ecs-deploy@v0.2.0
+        with:
+          cluster: sample-app-prod-ecs-cluster
+          target: sample-app-fe-service
+          tag: ${{ needs.resolve-version.outputs.version }}
+          rollback: true
+          timeout: 300
+
+  create-release:
+    needs:
+      - resolve-version
+      - backend-ecs-update
+      - celery-worker-ecs-update
+      - celery-beat-ecs-update
+      - frontend-ecs-update
+    if: |
+      always() &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled') &&
+      (
+        needs.backend-ecs-update.result       == 'success' ||
+        needs.celery-worker-ecs-update.result == 'success' ||
+        needs.celery-beat-ecs-update.result   == 'success' ||
+        needs.frontend-ecs-update.result      == 'success'
+      )
+    runs-on: ubicloud-standard-4
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-version.outputs.deploy_ref }}
+
+      - name: Collect Tracker tasks in this release
+        id: tickets
+        run: |
+          PREV_TAG="${{ needs.resolve-version.outputs.prev_tag }}"
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+            echo "No previous tag — using all history"
+          else
+            RANGE="$PREV_TAG..HEAD"
+            echo "Comparing $RANGE"
+          fi
+
+          {
+            echo 'body<<EOF'
+            echo "### Tracker tasks in this release"
+            IDS=$(git log "$RANGE" --format="%s %b" | grep -oP 'TKT-[a-zA-Z0-9]+' | sort -u || true)
+            if [ -z "$IDS" ]; then
+              echo "_No Tracker task IDs found in commit messages._"
+            else
+              for ID in $IDS; do
+                TASK="${ID#TKT-}"
+                echo "- [$ID](https://tracker.example.com/t/$TASK)"
+              done
+            fi
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Create tag + GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-version.outputs.version }}
+          target_commitish: ${{ needs.resolve-version.outputs.deploy_ref }}
+          name: ${{ needs.resolve-version.outputs.version }}
+          body: ${{ steps.tickets.outputs.body }}
+          generate_release_notes: true
+
+      - name: Notify deploy channel
+        if: ${{ vars.SLACK_DEPLOY_ENABLED == 'true' }}
+        run: |
+          curl -s -X POST "${{ secrets.SLACK_DEPLOY_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\": \":rocket: *${{ needs.resolve-version.outputs.version }}* deployed to *prod* by ${{ github.actor }}. Release notes: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve-version.outputs.version }}\"}"
